@@ -1,5 +1,5 @@
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::Table;
 use firestore::*;
@@ -16,11 +16,20 @@ use skillratings::{
 use std::collections::HashMap;
 use std::default::Default;
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
 #[derive(Parser, Debug)]
 #[clap()]
 struct Arguments {
     #[clap(short, long, value_parser, default_value_t = String::from("oort-319301"))]
     project_id: String,
+
+    #[clap(value_enum, short, long, default_value_t = OutputFormat::Human, global=true)]
+    output_format: OutputFormat,
 
     #[clap(subcommand)]
     cmd: SubCommand,
@@ -72,13 +81,23 @@ async fn main() -> anyhow::Result<()> {
             usernames,
             rounds,
             dry_run,
-        } => cmd_run(&args.project_id, &scenario, &usernames, rounds, dry_run).await,
+        } => {
+            cmd_run(
+                &args.project_id,
+                &scenario,
+                &usernames,
+                rounds,
+                dry_run,
+                args.output_format,
+            )
+            .await
+        }
         SubCommand::RunUnofficial {
             scenario,
             shortcodes,
             rounds,
             dev,
-        } => cmd_run_unofficial(&scenario, &shortcodes, rounds, dev).await,
+        } => cmd_run_unofficial(&scenario, &shortcodes, rounds, dev, args.output_format).await,
         SubCommand::Fetch { scenario, out_dir } => {
             cmd_fetch(&args.project_id, &scenario, &out_dir).await
         }
@@ -91,6 +110,7 @@ async fn cmd_run(
     usernames: &[String],
     rounds: i32,
     dry_run: bool,
+    output_format: OutputFormat,
 ) -> anyhow::Result<()> {
     let db = FirestoreDb::new(project_id).await?;
     scenario::load_safe(scenario_name).expect("Unknown scenario");
@@ -115,7 +135,10 @@ async fn cmd_run(
     log::info!("Running tournament");
     let results = run_tournament(scenario_name, &ais, rounds);
 
-    display_results(&results);
+    match output_format {
+        OutputFormat::Human => display_results(&results),
+        OutputFormat::Json => println!("{}", serde_json::to_string(&results)?),
+    }
 
     if !dry_run {
         upload_results(&db, project_id, &entrants, &results).await?;
@@ -129,6 +152,7 @@ async fn cmd_run_unofficial(
     shortcodes: &[String],
     rounds: i32,
     dev: bool,
+    output_format: OutputFormat,
 ) -> anyhow::Result<()> {
     scenario::load_safe(scenario_name).expect("Unknown scenario");
 
@@ -138,7 +162,10 @@ async fn cmd_run_unofficial(
     log::info!("Running tournament");
     let results = run_tournament(scenario_name, &ais, rounds);
 
-    display_results(&results);
+    match output_format {
+        OutputFormat::Human => display_results(&results),
+        OutputFormat::Json => println!("{}", serde_json::to_string(&results)?),
+    }
 
     Ok(())
 }
