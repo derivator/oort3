@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Local, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::Table;
@@ -60,6 +60,19 @@ enum SubCommand {
         #[clap(long)]
         wasm_cache: Option<PathBuf>,
     },
+    RunGauntlet {
+        scenario: String,
+        shortcodes: Vec<String>,
+
+        #[clap(short, long)]
+        rounds: u32,
+
+        #[clap(short, long)]
+        dev: bool,
+
+        #[clap(long)]
+        wasm_cache: Option<PathBuf>,
+    },
     Fetch {
         scenario: String,
         out_dir: String,
@@ -103,6 +116,23 @@ async fn main() -> anyhow::Result<()> {
             wasm_cache,
         } => {
             cmd_run_unofficial(
+                &scenario,
+                &shortcodes,
+                rounds,
+                dev,
+                args.output_format,
+                wasm_cache,
+            )
+            .await
+        }
+        SubCommand::RunGauntlet {
+            scenario,
+            shortcodes,
+            rounds,
+            dev,
+            wasm_cache,
+        } => {
+            cmd_run_gauntlet(
                 &scenario,
                 &shortcodes,
                 rounds,
@@ -180,6 +210,64 @@ async fn cmd_run_unofficial(
 
     match output_format {
         OutputFormat::Human => display_results(&results),
+        OutputFormat::Json => println!("{}", serde_json::to_string(&results)?),
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SimResult {
+    opponent: String,
+    seed: u32,
+    points: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct GauntletResult {
+    timestamp: DateTime<Local>,
+    avg_points: f64,
+    results: Vec<SimResult>,
+}
+
+async fn cmd_run_gauntlet(
+    scenario_name: &str,
+    shortcodes: &[String],
+    rounds: u32,
+    dev: bool,
+    output_format: OutputFormat,
+    wasm_cache: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    scenario::load_safe(scenario_name).expect("Unknown scenario");
+
+    let http = reqwest::Client::new();
+    let ais = oort_tools::fetch_and_compile_multiple(&http, shortcodes, dev, wasm_cache.as_deref())
+        .await?;
+
+    log::info!("Running gauntlet");
+    let rounds: Vec<(u32, usize)> = (0..rounds)
+        .flat_map(|seed| (1..ais.len()).map(move |idx| (seed, idx)))
+        .collect();
+    let results: Vec<SimResult> = rounds
+        .par_iter()
+        .map(|(seed, enemy)| SimResult {
+            opponent: ais[*enemy].name.clone(),
+            seed: *seed,
+            points: run_simulation(scenario_name, *seed, &[&ais[0], &ais[*enemy]])
+                .to_chess_points(),
+        })
+        .collect();
+
+    log::info!("Done!");
+    let avg_points: f64 =
+        results.iter().map(|result| result.points).sum::<f64>() / rounds.len() as f64;
+    let results = GauntletResult {
+        timestamp: Local::now(),
+        avg_points,
+        results,
+    };
+    match output_format {
+        OutputFormat::Human => println!("Points: {:.3}", avg_points),
         OutputFormat::Json => println!("{}", serde_json::to_string(&results)?),
     }
 
